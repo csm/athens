@@ -72,6 +72,9 @@
 
     :source-paths ["dev"]}
    :prod
-   {:dependencies [[day8.re-frame/tracing-stubs "0.5.3"]]}}
+   {:dependencies [[day8.re-frame/tracing-stubs "0.5.3"]]}
+   :aws
+   {:source-paths ["src/aws-js"]}}
+
 
   :prep-tasks [])
