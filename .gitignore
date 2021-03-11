@@ -30,3 +30,7 @@
 
 # electron build
 dist
+
+# AWS secrets
+aws/private.pem
+aws/public.pem
