@@ -1,0 +1,73 @@
+service: athens-user-api
+
+provider:
+  name: aws
+  runtime: nodejs14.x
+  stage: ${opt:stage, 'dev'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:Get
+          Resource: !Ref AthensUserTable
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: !Ref AthensBucket
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+            - ssm:GetParameters
+          Resource:
+            - '${file(arns.yml):ssm}/Athens/PrivateKey'
+            - '${file(arns.yml):ssm}/Athens/PublicKey'
+        - Effect: Allow
+          Action:
+            - ssm:DescribeParameters
+          Resource: '*'
+        - Effect: Allow
+          Action:
+            - kms:Decrypt
+          Resource: FIXME # need to get ARN for kms key alias/aws/ssm, or use own CMK
+
+functions:
+  athens-authenticate:
+    handler: lambdas.authenticate
+  athens-login:
+    handler: lambdas.login
+    events:
+      http:
+        method: post
+        path: /athens/v1/login
+  athens-getSignedUrl:
+    handler: lambdas.getSignedUrl
+    events:
+      http:
+        method: get
+        path: /athens/v1/signedUrl
+        request:
+          parameters:
+            querystrings:
+              path: true
+              verb: true
+        authorizer: athens-authenticate
+
+resources:
+  Resources:
+    AthensBucket:
+      Type: AWS::S3::Bucket
+    
+    AthensUserTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: emailHash
+            AttributeType: S
+        KeySchema:
+          - AttributeName: emailHash
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
