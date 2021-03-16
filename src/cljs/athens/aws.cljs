@@ -19,7 +19,7 @@ TODO, make these configurable."
                                                           :Password password})
         user-pool (new cognito/CognitoUserPool (clj->js @(re-frame/subscribe [:cognito/user-pool])))
         user (new congito/CognitoUser #js{:Username username
-                                          :Pool pool})]
+                                          :Pool user-pool})]
     (.authenticateUser user auth-data
                        #js {:onSuccess (fn [session]
                                          (re-frame/dispatch [:cognito/session user (keywordize-keys (js->clj session))]))
@@ -28,18 +28,31 @@ TODO, make these configurable."
                             :mfaRequired (fn [_ _]
                                            (re-frame/dispatch [:cognito/mfa-required user]))})))
 
+(defn mfa-respond
+  [code]
+  (let [user @(re-frame/subscribe [:cognito/user])]
+    (.sendMFACode user code
+                  #js {:onSuccess (fn [session]
+                                    (re-frame/dispatch [:cognito/session user (keywordize-keys (js->clj session))]))
+                       :onFailure (fn [error]
+                                    (re-frame/dispatch [:cognito/error error]))})))
+
+(defn parse-claims
+  [token]
+  (-> token
+      (string/split #"\.")
+      (second)
+      (js/Buffer.from "base64")
+      (.toString)
+      (js/JSON.parse)
+      (js->clj)
+      (keywordize-keys)))
+
 (defn id-token-valid?
   [session]
   (try
     (let [token (get-in session [:idToken :jwtToken])
-          claims (-> token
-                     (string/split #"\.")
-                     (second)
-                     (js/Buffer.from "base64")
-                     (.toString)
-                     (js/JSON.parse)
-                     (js->clj)
-                     (keywordize-keys))]
+          claims (parse-claims token)]
       (and (number? (:exp claims))
            (> (:exp claims) (long (/ (js/Date.now) 1000)))))
     (catch js/Error _ false)))
@@ -66,36 +79,43 @@ TODO, make these configurable."
                            (if (some? err)
                              (cb err nil)
                              (do
-                               (re-frame/dispatch [:cognito/session session])
+                               (re-frame/dispatch [:cognito/session user session])
                                (cb nil session)))))))))
+
+(defn get-subject
+  [session]
+  (let [claims (-> session :idToken :jwtToken (parse-claims))]
+    (:sub claims)))
 
 (defn get-cloud-file
   [path]
   (let [session @(re-frame/subscribe [:cognito/session])
         bucket @(re-frame/subscribe [:aws/bucket])
-        factory (s3-client-factory session)]
+        factory (s3-client-factory session)
+        s3-path (str "athens/" (get-subject session) \/ path)]
      (factory
        (fn [err client]
          (if (some? err)
-           (re-frame/dispatch [:aws/error err])
+           (re-frame/dispatch [:aws/error {:error err :op :get-cloud-file :path path}])
            (.getObject client #js {:Bucket bucket
-                                   :Key path}
+                                   :Key s3-path}
                        (fn [err object]
                          (if (some? err)
-                           (re-frame/dispatch [:aws/error err])
+                           (re-frame/dispatch [:aws/error {:error err :op :get-cloud-file :path path}])
                            (re-frame/dispatch [:aws/received-file path (get (js->clj object) "Body")])))))))))
 
 (defn put-cloud-file
   [path contents]
   (let [session @(re-frame/subscribe [:cognito/session])
         bucket @(re-frame/subscribe [:aws/bucket])
-        factory (s3-client-factory session)]
+        factory (s3-client-factory session)
+        s3-path (str "athens/" (get-subject session) \/ path)]
     (factory
       (fn [err client]
         (if (some? err)
-          (re-frame/dispatch [:aws/error err])
+          (re-frame/dispatch [:aws/error {:error err :op :put-cloud-file :path path}])
           (.putObject client #js {:Bucket bucket
-                                  :Key path
+                                  :Key s3-path
                                   :Body contents}
                       (fn [err _]
                         (if (some? err)

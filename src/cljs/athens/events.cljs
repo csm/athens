@@ -1515,3 +1515,34 @@
                                       (let [new-str (link-unlinked-reference string title)]
                                         {:db/id [:block/uid uid] :block/string new-str}))))]
       {:dispatch [:transact new-str-tx-data]})))
+
+; aws sync
+
+(reg-event-db
+  :cognito/session
+  (fn [db [_ user session]]
+    (assoc db :cognito/user user :cognito/session session)))
+
+(reg-event-fx
+  :cognito/error
+  (fn [_ [_ error]]
+    (println "todo: display dialog for error")
+    {}))
+
+(reg-event-db
+  :cognito/mfa-required
+  (fn [db [_ user]]
+    (println "todo: display dialog for requesting MFA code")
+    (assoc db :cognito/user user)))
+
+(reg-event-fx
+  :aws/error
+  (fn [_ [_ error]]
+    (println "todo: display UI for error")
+    {}))
+
+(reg-event-db
+  :aws/received-file
+  (fn [db [_ path contents]]
+    (println "todo: read back contents of db from cloud")
+    db))
