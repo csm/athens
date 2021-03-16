@@ -31,6 +31,5 @@
 # electron build
 dist
 
-# AWS secrets
-aws/private.pem
-aws/public.pem
+# AWS deployment
+aws/.serverless/*

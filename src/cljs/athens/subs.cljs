@@ -132,3 +132,8 @@
   :modal
   (fn [db _]
     (:modal db)))
+
+(re-frame/reg-sub
+  :cognito/user-pool
+  (fn [db _]
+    (:cognito/user-pool db)))

@@ -53,6 +53,7 @@
     "@sentry/integrations": "^6.1.0",
     "@sentry/react": "^5.27.2",
     "@sentry/tracing": "^5.27.2",
+    "amazon-cognito-identity-js": "4.5.14",
     "aws-sdk": "2.858.0",
     "create-react-class": "^15.6.3",
     "electron-log": "^4.2.4",
@@ -65,8 +66,7 @@
     "react": "16.9.0",
     "react-dom": "16.9.0",
     "react-force-graph-2d": "^1.19.0",
-    "react-highlight.js": "1.0.7",
-    "xmlhttprequest": "1.8.0"
+    "react-highlight.js": "1.0.7"
   },
   "devDependencies": {
     "electron": "^11.2.3",

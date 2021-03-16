@@ -1,67 +1,103 @@
 (ns athens.aws
-  (require [cljs.core.async :refer-macros [go] :as async]
-           [cljs-http.client :as http]
-           [clojure.walk :refer [keywordize-keys]]
-           [cemerick.uri :as uri]
-           [full.async :refer-macros [<?]]))
- ;          ["xmlhttprequest" :refer [XMLHttpRequest]]))
+  (require [clojure.walk :refer [keywordize-keys]]
+           [re-frame.core :as re-frame]
+           ["aws-sdk" :as aws]
+           ["amazon-cognito-identity-js" :as cognito]
+           [clojure.string :as string]))
 
-;(set! js/XMLHttpRequest XMLHttpRequest)
+"For cognito, some pieces of configuration are required:
+
+* user pool ID
+* client ID
+* identity pool ID
+
+TODO, make these configurable."
 
 (defn login
-  [email password base-url]
-  (go
-    (let [url (str (uri/uri base-url "athens" "v1" "login"))
-          result (<? (http/post url {:json-params {:email email :password password}}))]
-      (if (= 200 (:status result))
-        (-> result :body (js/JSON.parse) js->clj keywordize-keys)
-        (ex-info "login failed" {:response result})))))
+  [username password]
+  (let [auth-data (new cognito/AuthenticationDetails #js {:Username username
+                                                          :Password password})
+        user-pool (new cognito/CognitoUserPool (clj->js @(re-frame/subscribe [:cognito/user-pool])))
+        user (new congito/CognitoUser #js{:Username username
+                                          :Pool pool})]
+    (.authenticateUser user auth-data
+                       #js {:onSuccess (fn [session]
+                                         (re-frame/dispatch [:cognito/session user (keywordize-keys (js->clj session))]))
+                            :onFailure (fn [error]
+                                         (re-frame/dispatch [:cognito/error error]))
+                            :mfaRequired (fn [_ _]
+                                           (re-frame/dispatch [:cognito/mfa-required user]))})))
 
-(defn get-signed-url
-  [path op token base-url]
-  (go
-    (if (#{:get :post} op)
-      (let [url (str (uri/uri base-url "athens" "v1" "signedUrl"))
-            result (<? (http/get url {:params {:path path :op (name op)}
-                                      :with-credentials? false
-                                      :oauth-token token}))]
-        (if (= 200 (:status result))
-          (-> result :body (js/JSON.parse) js->clj keywordize-keys)
-          (ex-info "fetching URL failed" {:response result}))))))
+(defn id-token-valid?
+  [session]
+  (try
+    (let [token (get-in session [:idToken :jwtToken])
+          claims (-> token
+                     (string/split #"\.")
+                     (second)
+                     (js/Buffer.from "base64")
+                     (.toString)
+                     (js/JSON.parse)
+                     (js->clj)
+                     (keywordize-keys))]
+      (and (number? (:exp claims))
+           (> (:exp claims) (long (/ (js/Date.now) 1000)))))
+    (catch js/Error _ false)))
 
-(defn valid-signed-url
-  [url]
-  (let [url (uri/uri url)
-        expires (some-> url :query (get "Expires") (js/Number.parseInt))]
-    (when (and (some? expires) (< (/ (js/Date.now) 1000) expires))
-      url)))
+(defn make-s3-client
+  [session]
+  (let [region @(re-frame/subscribe [:aws/region])
+        identity-pool-id @(re-frame/subscribe [:cognito/identity-pool-id])
+        user-pool @(re-frame/subscribe [:cognito/user-pool])
+        creds (new aws/CognitoIdentityCredentials #js {:IdentityPoolId identity-pool-id
+                                                       :Logins {(str "cognito-idp." region ".amazonaws.com/" (:UserPoolId user-pool))
+                                                                (get-in session [:idToken :jwtToken])}})]
+    (new aws.S3 #js {:region region
+                     :credentials creds})))
 
-(defn stash!
-  [urls path url]
-  (get (swap! urls assoc path url) path))
+(defn s3-client-factory
+  [session]
+  (if (id-token-valid? session)
+    (fn [cb] (cb nil (make-s3-client session)))
+    (let [user @(re-frame/subscribe [:cognito/user])]
+      (fn [cb]
+        (.refreshSession user
+                         (fn [err session]
+                           (if (some? err)
+                             (cb err nil)
+                             (do
+                               (re-frame/dispatch [:cognito/session session])
+                               (cb nil session)))))))))
 
-(let [urls (atom {})]
-  (defn get-cloud-file
-    [path token base-url]
-    (go
-      (let [url (or (-> @urls (get path) valid-signed-url)
-                    (->> (<? (get-signed-url path :get token base-url))
-                         (stash! urls path)))
-            response (<? (http/get url))]
-        (if (= 200 (:status response))
-          (:body response)
-          (ex-info "failed to get cloud file" {:response response}))))))
+(defn get-cloud-file
+  [path]
+  (let [session @(re-frame/subscribe [:cognito/session])
+        bucket @(re-frame/subscribe [:aws/bucket])
+        factory (s3-client-factory session)]
+     (factory
+       (fn [err client]
+         (if (some? err)
+           (re-frame/dispatch [:aws/error err])
+           (.getObject client #js {:Bucket bucket
+                                   :Key path}
+                       (fn [err object]
+                         (if (some? err)
+                           (re-frame/dispatch [:aws/error err])
+                           (re-frame/dispatch [:aws/received-file path (get (js->clj object) "Body")])))))))))
 
-(let [urls (atom {})]
-  (defn put-cloud-file
-    [path contents token base-url]
-    (go
-      (let [url (or (-> @urls (get path) valid-signed-url)
-                    (->> (<? (get-signed-url path :get token base-url))
-                         (stash! urls path)))
-            response (<? (http/put url {:body contents}))]
-        (if (= 200 (:status response))
-          (:body response)
-          (ex-info "failed to get cloud file" {:response response}))))))
-
-
+(defn put-cloud-file
+  [path contents]
+  (let [session @(re-frame/subscribe [:cognito/session])
+        bucket @(re-frame/subscribe [:aws/bucket])
+        factory (s3-client-factory session)]
+    (factory
+      (fn [err client]
+        (if (some? err)
+          (re-frame/dispatch [:aws/error err])
+          (.putObject client #js {:Bucket bucket
+                                  :Key path
+                                  :Body contents}
+                      (fn [err _]
+                        (if (some? err)
+                          (re-frame/dispatch [:aws/error {:error err :op :put-cloud-file :path path}])
+                          (re-frame/dispatch [:aws/sent-file path])))))))))

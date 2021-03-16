@@ -2,72 +2,127 @@ service: athens-user-api
 
 provider:
   name: aws
+  region: us-east-1
   runtime: nodejs14.x
   stage: ${opt:stage, 'dev'}
-  iam:
-    role:
-      statements:
-        - Effect: Allow
-          Action:
-            - dynamodb:Get
-          Resource: !Ref AthensUserTable
-        - Effect: Allow
-          Action:
-            - s3:GetObject
-            - s3:PutObject
-          Resource: !Ref AthensBucket
-        - Effect: Allow
-          Action:
-            - ssm:GetParameter
-            - ssm:GetParameters
-          Resource:
-            - '${file(arns.yml):ssm}/Athens/PrivateKey'
-            - '${file(arns.yml):ssm}/Athens/PublicKey'
-        - Effect: Allow
-          Action:
-            - ssm:DescribeParameters
-          Resource: '*'
-        - Effect: Allow
-          Action:
-            - kms:Decrypt
-          Resource: FIXME # need to get ARN for kms key alias/aws/ssm, or use own CMK
-
-functions:
-  athens-authenticate:
-    handler: lambdas.authenticate
-  athens-login:
-    handler: lambdas.login
-    events:
-      http:
-        method: post
-        path: /athens/v1/login
-  athens-getSignedUrl:
-    handler: lambdas.getSignedUrl
-    events:
-      http:
-        method: get
-        path: /athens/v1/signedUrl
-        request:
-          parameters:
-            querystrings:
-              path: true
-              verb: true
-        authorizer: athens-authenticate
 
 resources:
   Resources:
     AthensBucket:
       Type: AWS::S3::Bucket
-    
-    AthensUserTable:
-      Type: AWS::DynamoDB::Table
+      #DeletionPolicy: Retain
+
+    AthensUserPool:
+      Type: AWS::Cognito::UserPool
       Properties:
-        AttributeDefinitions:
-          - AttributeName: emailHash
-            AttributeType: S
-        KeySchema:
-          - AttributeName: emailHash
-            KeyType: HASH
-        ProvisionedThroughput:
-          ReadCapacityUnits: 1
-          WriteCapacityUnits: 1
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - Name: verified_email
+              Priority: 1
+            - Name: verified_phone_number
+              Priority: 2
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: true
+        AutoVerifiedAttributes:
+          - email
+          - phone_number
+        # TODO for production, consider adding EmailConfiguration
+        # with a EmailSendingAccount of DEVELOPER, and a valid SES
+        # configuration.
+        # TODO Set EmailVerificationMessage with SES to customize
+        # verification emails
+        EnabledMfas:
+          - SMS_MFA
+          - SOFTWARE_TOKEN_MFA
+        MfaConfiguration: OPTIONAL
+        SmsConfiguration:
+          ExternalId: '5beacebc-1213-44c7-aed6-2654f6c0c07d'
+          SnsCallerArn: !GetAtt SmsSnsRole.Arn
+        # Consider customizing SMS configs
+        UsernameAttributes:
+          - email
+          - phone_number
+        UserPoolName: AthensUsers
+
+    AthensUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: AthensUserPoolClient
+        UserPoolId: !Ref AthensUserPool
+
+    AthensIdentityPool:
+      Type: AWS::Cognito::IdentityPool
+      Properties:
+        AllowUnauthenticatedIdentities: False
+        CognitoIdentityProviders:
+          - ClientId: !Ref AthensUserPoolClient
+            ProviderName: !GetAtt AthensUserPool.ProviderName
+        
+    AthensIdentityPoolRoleAttachment:
+      Type: AWS::Cognito::IdentityPoolRoleAttachment
+      Properties:
+        IdentityPoolId: !Ref AthensIdentityPool
+        RoleMappings:
+          cognitoProvider:
+            AmbiguousRoleResolution: AuthenticatedRole
+            IdentityProvider: !Join [':', [!GetAtt AthensUserPool.ProviderName, !Ref AthensUserPoolClient]]
+            RulesConfiguration:
+              Rules:
+                - Claim: 'isPremium'
+                  MatchType: Equals
+                  RoleARN: !Ref AthensUserRole
+                  Value: 'true'
+            Type: Rules
+        Roles:
+          authenticated: !GetAtt AthensUserRole.Arn
+
+    AthensUserRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            - Sid: assumeRole
+              Effect: Allow
+              Principal:
+                Service: cognito-idp.amazonaws.com
+              Action: sts:AssumeRoleWithWebIdentity
+        Policies:
+          - PolicyName: AthensUserS3Access
+            PolicyDocument:
+              Statement:
+                - Sid: allowOwnObjectsAccess
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                    - s3:DeleteObject
+                  Resource:
+                    - Fn::Join:
+                        - ''
+                        - - 'arn:aws:s3:::'
+                          - !Ref AthensBucket
+                          - '/athens/\${cognito-identity.amazonaws.com:sub}/*'
+                - Sid: allowListBucket
+                  Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource:
+                    - !GetAtt AthensBucket.Arn
+    SmsSnsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - 'cognito-idp.amazonaws.com'
+              Action:
+                - 'sts:AssumeRole'
+        Policies:
+          - PolicyName: SmsSenderPolicy
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action: 'sns:Publish'
+                  Resource: '*'

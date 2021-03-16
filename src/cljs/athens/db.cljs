@@ -36,7 +36,10 @@
                :mouse-down          false
                :daily-notes/items   []
                :selected/items      []
-               :theme/dark          false})
+               :theme/dark          false
+               :cognito/user-pool   {:UserPoolId "us-east-1_7gFtzXKpr"
+                                     :ClientId "6vi6lnhltvgpvlv5ilbrmg86rs"}
+               :cognito/identity-pool-id "us-east-1:3757dc0c-dd19-44ba-bd40-588f5d8d86b8"})
 
 
 ;; -- JSON Parsing ----------------------------------------------------
